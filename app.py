@@ -148,7 +148,7 @@ elif menu == "TV Display":
     if not current.empty:
         ticket = current["ticket_number"].iloc[0]
         name = current["full_name"].iloc[0]
-        destination = current["destination"].iloc[0]
+        destination = current["destination"].iloc[0] if current["destination"].iloc[0] else "Triage"
         st.markdown(
             f"<h1 style='text-align:center;'>Now Serving</h1>"
             f"<h2 style='text-align:center; color:red; animation: blinker 1s infinite;'>#{ticket} - {name}</h2>"
@@ -162,174 +162,23 @@ elif menu == "TV Display":
     tips = ["💧 Drink water", "🍎 Eat fruits", "🏃‍♂️ Exercise daily", "🧘 Meditate", "💉 Get vaccinated"]
     st.markdown(f"<p style='text-align:center; font-size:20px; color:green;'>{random.choice(tips)}</p>", unsafe_allow_html=True)
 
-elif menu == "Triage":
-    st.title("📋 Triage Station (Login Required)")
-    if "triage_logged" not in st.session_state:
-        st.session_state.triage_logged = False
-    if not st.session_state.triage_logged:
-        pw = st.text_input("Triage Password", type="password")
-        if st.button("Login"):
-            if pw == "triage123":
-                st.session_state.triage_logged = True
-                st.success("✅ Triage login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        weight = st.number_input("Weight (kg)")
-        height = st.number_input("Height (cm)")
-        bp = st.text_input("Blood Pressure")
-        if st.button("Save Triage"):
-            update_triage(pid, weight, height, bp)
-            st.success("✅ Patient triaged → Consultation")
-        if st.button("Logout"):
-            st.session_state.triage_logged = False
-
-elif menu == "Doctor Panel":
-    st.title("👨‍⚕️ Doctor Panel (Login Required)")
-    if "doctor_logged" not in st.session_state:
-        st.session_state.doctor_logged = False
-    if not st.session_state.doctor_logged:
-        pw = st.text_input("Doctor Password", type="password")
-        if st.button("Login"):
-            if pw == "doctor123":
-                st.session_state.doctor_logged = True
-                st.success("✅ Doctor login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        condition = st.text_area("Condition / Diagnosis")
-        destination = st.selectbox("Send to", ["Pharmacy", "Lab", "Payment"])
-        if st.button("Complete Consultation"):
-            update_doctor(pid, condition, destination)
-            st.success(f"✅ Patient sent to {destination}")
-        st.dataframe(get_queue())
-        if st.button("Logout"):
-            st.session_state.doctor_logged = False
-
-# ----------------- PHARMACY -----------------
-elif menu == "Pharmacy":
-    st.title("💊 Pharmacy Dashboard (Login Required)")
-    if "pharmacy_logged" not in st.session_state:
-        st.session_state.pharmacy_logged = False
-    if not st.session_state.pharmacy_logged:
-        pw = st.text_input("Pharmacy Password", type="password")
-        if st.button("Login"):
-            if pw == "pharmacy123":
-                st.session_state.pharmacy_logged = True
-                st.success("✅ Pharmacy login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        df = pd.read_sql("SELECT * FROM queue WHERE destination='Pharmacy' AND status!='done'", conn)
-        st.dataframe(df)
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        if st.button("Mark as Done"):
-            mark_done(pid, "Pharmacy")
-            st.success("✅ Patient served at Pharmacy")
-        if st.button("Logout"):
-            st.session_state.pharmacy_logged = False
-
-# ----------------- LAB -----------------
-elif menu == "Lab":
-    st.title("🧪 Lab Dashboard (Login Required)")
-    if "lab_logged" not in st.session_state:
-        st.session_state.lab_logged = False
-    if not st.session_state.lab_logged:
-        pw = st.text_input("Lab Password", type="password")
-        if st.button("Login"):
-            if pw == "lab123":
-                st.session_state.lab_logged = True
-                st.success("✅ Lab login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        df = pd.read_sql("SELECT * FROM queue WHERE destination='Lab' AND status!='done'", conn)
-        st.dataframe(df)
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        if st.button("Mark as Done"):
-            mark_done(pid, "Lab")
-            st.success("✅ Patient served at Lab")
-        if st.button("Logout"):
-            st.session_state.lab_logged = False
-
-# ----------------- PAYMENT -----------------
-elif menu == "Payment":
-    st.title("💵 Payment Dashboard (Login Required)")
-    if "payment_logged" not in st.session_state:
-        st.session_state.payment_logged = False
-    if not st.session_state.payment_logged:
-        pw = st.text_input("Payment Password", type="password")
-        if st.button("Login"):
-            if pw == "payment123":
-                st.session_state.payment_logged = True
-                st.success("✅ Payment login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        df = pd.read_sql("SELECT * FROM queue WHERE destination='Payment' AND status!='done'", conn)
-        st.dataframe(df)
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        if st.button("Mark as Done"):
-            mark_done(pid, "Payment")
-            st.success("✅ Patient cleared Payment")
-        if st.button("Logout"):
-            st.session_state.payment_logged = False
-
-# ----------------- ANALYTICS -----------------
 elif menu == "Analytics":
     st.title("📊 Analytics Dashboard")
     df = get_queue()
     if not df.empty:
         df["entry_time"] = pd.to_datetime(df["entry_time"], errors="coerce")
         df["exit_time"] = pd.to_datetime(df["exit_time"], errors="coerce")
-        df["wait"] = (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60
-        st.metric("Average Wait Time", f"{df['wait'].mean():.1f} min")
-        fig, ax = plt.subplots()
-        df["destination"].value_counts().plot(kind="bar", ax=ax)
-        st.pyplot(fig)
-    else:
-        st.info("No data yet")
+        df = df.dropna(subset=["entry_time", "exit_time"])  # ✅ only completed patients
 
-# ----------------- CHATBOT -----------------
-elif menu == "Chatbot":
-    st.title("🤖 Hospital Chatbot")
-    faq = {
-        "register": "📝 Register at the kiosk and get a ticket.",
-        "triage": "📋 Triage includes weight, height, and blood pressure checks.",
-        "doctor": "👨‍⚕️ Doctor consultation follows triage.",
-        "pharmacy": "💊 Go to pharmacy after consultation.",
-        "lab": "🧪 Go to lab if doctor refers you.",
-        "payment": "💵 Finish at payment counter."
-    }
-    q = st.text_input("Ask me something...")
-    if q:
-        match = get_close_matches(q.lower(), faq.keys(), n=1, cutoff=0.4)
-        if match:
-            st.write(faq[match[0]])
+        if not df.empty:
+            df["wait"] = (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60
+            st.metric("Average Wait Time", f"{df['wait'].mean():.1f} min")
+            fig, ax = plt.subplots()
+            df["destination"].value_counts().plot(kind="bar", ax=ax)
+            st.pyplot(fig)
         else:
-            st.write("I’m still learning 🤖. Please ask reception.")
+            st.info("No completed patients yet for analytics.")
+    else:
+        st.info("No data yet.")
 
-# ----------------- FAQ -----------------
-elif menu == "FAQs":
-    st.title("❓ Frequently Asked Questions")
-    st.write("""
-    **Q: How do I register?**  
-    A: Use the kiosk at the entrance.  
-
-    **Q: What happens at triage?**  
-    A: Vitals are recorded (weight, height, BP).  
-
-    **Q: Where do I go after the doctor?**  
-    A: You’ll be directed to Pharmacy, Lab, or Payment.  
-    """)
-
-# ----------------- CONTACTS -----------------
-elif menu == "Contacts":
-    st.title("📞 Contact Us")
-    st.markdown("""
-    **📧 Email:** [marrionwahome974@gmail.com](mailto:marrionwahome974@gmail.com)  
-    **📱 Phone:** +254111838986  
-    """)
-    st.info("We’re here to support you with any issues or inquiries.")
+# (keep your Triage, Doctor, Pharmacy, Lab, Payment, Chatbot, FAQ, Contacts code unchanged)
