@@ -6,16 +6,17 @@ from gtts import gTTS
 import os
 from streamlit_autorefresh import st_autorefresh
 
-
 # ----------------- DATABASE SETUP -----------------
 conn = sqlite3.connect("hospital.db", check_same_thread=False)
 c = conn.cursor()
 
-# Patients table
+# Patients table with separate name fields
 c.execute('''
 CREATE TABLE IF NOT EXISTS patients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
+    first_name TEXT,
+    middle_name TEXT,
+    surname TEXT,
     age INTEGER,
     gender TEXT,
     condition TEXT
@@ -36,13 +37,13 @@ CREATE TABLE IF NOT EXISTS queue (
 conn.commit()
 
 # ----------------- FUNCTIONS -----------------
-def add_patient(name, age, gender, condition):
-    c.execute("INSERT INTO patients (name, age, gender, condition) VALUES (?, ?, ?, ?)",
-              (name, age, gender, condition))
+def add_patient(first_name, middle_name, surname, age, gender, condition):
+    c.execute("INSERT INTO patients (first_name, middle_name, surname, age, gender, condition) VALUES (?, ?, ?, ?, ?, ?)",
+              (first_name, middle_name, surname, age, gender, condition))
     conn.commit()
 
-def get_patient_by_name(name):
-    c.execute("SELECT * FROM patients WHERE name=?", (name,))
+def get_patient_by_name(first_name, surname):
+    c.execute("SELECT * FROM patients WHERE first_name=? AND surname=?", (first_name, surname))
     return c.fetchone()
 
 def add_to_queue(patient_id, emergency):
@@ -51,14 +52,27 @@ def add_to_queue(patient_id, emergency):
     conn.commit()
 
 def get_queue():
-    return pd.read_sql("SELECT q.queue_id, p.name, p.age, p.gender, p.condition, q.emergency, q.time, q.status \
-                        FROM queue q JOIN patients p ON q.patient_id = p.id WHERE q.status='waiting' \
-                        ORDER BY q.emergency DESC, q.queue_id ASC", conn)
+    return pd.read_sql("""
+        SELECT q.queue_id,
+               p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
+               p.age, p.gender, p.condition, q.emergency, q.time, q.status
+        FROM queue q
+        JOIN patients p ON q.patient_id = p.id
+        WHERE q.status='waiting'
+        ORDER BY q.emergency DESC, q.queue_id ASC
+    """, conn)
 
 def get_next_patient():
-    c.execute("SELECT q.queue_id, p.name, p.age, p.gender, p.condition FROM queue q \
-               JOIN patients p ON q.patient_id=p.id WHERE q.status='waiting' \
-               ORDER BY q.emergency DESC, q.queue_id ASC LIMIT 1")
+    c.execute("""
+        SELECT q.queue_id,
+               p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
+               p.age, p.gender, p.condition
+        FROM queue q
+        JOIN patients p ON q.patient_id=p.id
+        WHERE q.status='waiting'
+        ORDER BY q.emergency DESC, q.queue_id ASC
+        LIMIT 1
+    """)
     return c.fetchone()
 
 def mark_done(queue_id):
@@ -98,41 +112,50 @@ elif menu == "Upload Data":
 
         if st.button("Save to Database"):
             for _, row in df.iterrows():
-                # Basic check to avoid duplicates
-                existing = get_patient_by_name(row["name"])
+                existing = get_patient_by_name(row.get("first_name", ""), row.get("surname", ""))
                 if not existing:
-                    add_patient(row["name"], int(row["age"]), row["gender"], row.get("condition", ""))
+                    add_patient(
+                        row.get("first_name", ""),
+                        row.get("middle_name", ""),
+                        row.get("surname", ""),
+                        int(row.get("age", 0)),
+                        row.get("gender", ""),
+                        row.get("condition", "")
+                    )
             st.success("✅ Data uploaded successfully!")
 
 # ADD NEW PATIENT
 elif menu == "Add Patient":
     st.subheader("➕ Add New Patient")
-    name = st.text_input("Name")
+    first_name = st.text_input("First Name")
+    middle_name = st.text_input("Middle Name")
+    surname = st.text_input("Surname")
     age = st.number_input("Age", 0, 120)
     gender = st.selectbox("Gender", ["Male", "Female", "Other"])
     condition = st.text_area("Condition / Diagnosis")
 
     if st.button("Save Patient"):
-        add_patient(name, age, gender, condition)
+        add_patient(first_name, middle_name, surname, age, gender, condition)
         st.success("✅ Patient added successfully")
 
 # REGISTER TO QUEUE
 elif menu == "Register":
     st.subheader("📝 Register Patient to Queue")
-    patient_name = st.text_input("Enter Patient Name")
+    first_name = st.text_input("Enter Patient First Name")
+    surname = st.text_input("Enter Patient Surname")
     emergency = st.checkbox("Emergency Case?")
     if st.button("Register to Queue"):
-        patient = get_patient_by_name(patient_name)
+        patient = get_patient_by_name(first_name, surname)
         if patient:
             add_to_queue(patient[0], emergency)
-            st.success(f"✅ {patient[1]} added to queue")
+            st.success(f"✅ {first_name} {surname} added to queue")
         else:
             st.error("❌ Patient not found. Please add them first or upload hospital data.")
 
 # PATIENT RECORDS
 elif menu == "Patient Records":
     st.subheader("📂 Patient Records")
-    df = pd.read_sql("SELECT * FROM patients", conn)
+    df = pd.read_sql("SELECT id, first_name, middle_name, surname, age, gender, condition FROM patients", conn)
     st.dataframe(df)
 
 # DOCTOR VIEW
@@ -158,7 +181,8 @@ elif menu == "TV Display":
 
     # Get last patient served
     current = pd.read_sql("""
-        SELECT q.queue_id, p.name
+        SELECT q.queue_id,
+               p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name
         FROM queue q
         JOIN patients p ON q.patient_id = p.id
         WHERE q.status='done'
@@ -168,7 +192,7 @@ elif menu == "TV Display":
 
     if not current.empty:
         patient_num = current["queue_id"].iloc[0]
-        patient_name = current["name"].iloc[0]
+        patient_name = current["full_name"].iloc[0]
 
         # Big display
         st.markdown(
