@@ -4,5 +4,3 @@ gTTS
 streamlit-autorefresh
 openpyxl
 matplotlib
-difflib
-sqlite3
