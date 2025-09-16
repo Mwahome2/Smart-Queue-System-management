@@ -5,13 +5,13 @@ import datetime
 import random
 from gtts import gTTS
 from streamlit_autorefresh import st_autorefresh
+import matplotlib.pyplot as plt
 from difflib import get_close_matches
 
-# ----------------- DATABASE SETUP -----------------
+# ----------------- DB SETUP -----------------
 conn = sqlite3.connect("hospital.db", check_same_thread=False)
 c = conn.cursor()
 
-# Patients table
 c.execute('''
 CREATE TABLE IF NOT EXISTS patients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS patients (
 )
 ''')
 
-# Queue table
 c.execute('''
 CREATE TABLE IF NOT EXISTS queue (
     queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,17 +42,6 @@ CREATE TABLE IF NOT EXISTS queue (
 ''')
 conn.commit()
 
-# --- Migration check ---
-c.execute("PRAGMA table_info(queue)")
-cols = [col[1] for col in c.fetchall()]
-if "ticket_number" not in cols:
-    c.execute("ALTER TABLE queue ADD COLUMN ticket_number TEXT")
-if "location" not in cols:
-    c.execute("ALTER TABLE queue ADD COLUMN location TEXT")
-if "destination" not in cols:
-    c.execute("ALTER TABLE queue ADD COLUMN destination TEXT")
-conn.commit()
-
 # ----------------- FUNCTIONS -----------------
 def generate_ticket():
     return f"T{datetime.datetime.now().strftime('%H%M%S')}"
@@ -64,23 +52,30 @@ def add_patient(first_name, middle_name, surname, age, gender):
     conn.commit()
     return c.lastrowid
 
-def add_to_queue(patient_id, destination="Triage"):
+def add_to_queue(patient_id):
     ticket = generate_ticket()
     entry_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO queue (patient_id, ticket_number, entry_time, location, destination) VALUES (?, ?, ?, ?, ?)",
-              (patient_id, ticket, entry_time, "Entry", destination))
+    c.execute("INSERT INTO queue (patient_id, ticket_number, entry_time, location) VALUES (?, ?, ?, ?)",
+              (patient_id, ticket, entry_time, "Entry"))
     conn.commit()
     return ticket
 
 def update_triage(patient_id, weight, height, bp):
     c.execute("UPDATE patients SET weight=?, height=?, bp=? WHERE id=?", (weight, height, bp, patient_id))
-    c.execute("UPDATE queue SET location='Triage', status='waiting', destination='Consultation' WHERE patient_id=?", (patient_id,))
+    c.execute("UPDATE queue SET location='Triage', destination='Consultation' WHERE patient_id=?", (patient_id,))
     conn.commit()
 
-def update_condition(patient_id, condition):
+def update_doctor(patient_id, condition, destination):
+    exit_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute("UPDATE patients SET condition=? WHERE id=?", (condition, patient_id))
-    c.execute("UPDATE queue SET location='Consultation', status='done', exit_time=? WHERE patient_id=?",
-              (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), patient_id))
+    c.execute("UPDATE queue SET location='Doctor', destination=?, exit_time=? WHERE patient_id=?",
+              (destination, exit_time, patient_id))
+    conn.commit()
+
+def mark_done(patient_id, section):
+    exit_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("UPDATE queue SET location=?, status='done', exit_time=? WHERE patient_id=?",
+              (section, exit_time, patient_id))
     conn.commit()
 
 def get_queue():
@@ -88,7 +83,7 @@ def get_queue():
         SELECT q.queue_id, q.ticket_number,
                p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
                p.age, p.gender, p.weight, p.height, p.bp, p.condition,
-               q.location, q.status, q.destination
+               q.location, q.status, q.destination, q.entry_time, q.exit_time
         FROM queue q
         JOIN patients p ON q.patient_id = p.id
         ORDER BY q.queue_id ASC
@@ -105,19 +100,24 @@ def announce_patient(ticket, name, destination):
 st.set_page_config(page_title="Smart Queue System", page_icon="🏥", layout="wide")
 
 menu = st.sidebar.radio("📌 Navigation", 
-                        ["Home", "Kiosk (Entry)", "Triage", "Doctor Panel", "TV Display", "About", "Contacts", "FAQs", "Chatbot"])
+    ["Home", "About", "Kiosk (Entry)", "TV Display", "Triage", "Doctor Panel", 
+     "Pharmacy", "Lab", "Payment", "Analytics", "Chatbot", "FAQs", "Contacts"])
 
 # ----------------- PAGES -----------------
 if menu == "Home":
     st.title("🏥 Smart Queue & Patient Journey Tracking")
+    st.write("Welcome to the Hospital Smart Queue System. This app helps manage patients from entry to exit.")
+
+elif menu == "About":
+    st.title("ℹ️ About")
     st.write("""
-    This system manages patients from entry → triage → doctor → exit:
-    - 🎟 **Kiosk** issues tickets
-    - 📋 **Triage** records vitals
-    - 👨‍⚕️ **Doctor** enters diagnosis
-    - 📺 **TV Display** shows queue with audio + animations
+    This Smart Queue Management System was built to streamline patient flow:  
+    - 🎟 Kiosk → Patient self-registration  
+    - 📺 TV Display → Queue management with announcements  
+    - 📋 Triage → Vitals recording  
+    - 👨‍⚕️ Doctor Panel → Consultation & referral  
+    - 💊 Pharmacy / 🧪 Lab / 💵 Payment → Patient completion  
     """)
-    st.success("✅ Making hospital visits faster and transparent!")
 
 elif menu == "Kiosk (Entry)":
     st.title("🎟 Patient Kiosk (Entry)")
@@ -126,39 +126,14 @@ elif menu == "Kiosk (Entry)":
     surname = st.text_input("Surname")
     age = st.number_input("Age", 0, 120)
     gender = st.selectbox("Gender", ["Male", "Female", "Other"])
-    
     if st.button("Generate Ticket"):
-        patient_id = add_patient(first_name, middle_name, surname, age, gender)
-        ticket = add_to_queue(patient_id)
-        st.success(f"✅ Ticket generated: {ticket}. Please wait for Triage.")
-
-elif menu == "Triage":
-    st.title("📋 Triage Station")
-    patient_id = st.number_input("Enter Patient ID", step=1, min_value=1)
-    weight = st.number_input("Weight (kg)")
-    height = st.number_input("Height (cm)")
-    bp = st.text_input("Blood Pressure")
-    
-    if st.button("Save Triage Data"):
-        update_triage(patient_id, weight, height, bp)
-        st.success("✅ Triage data saved. Patient moved to Consultation queue.")
-
-elif menu == "Doctor Panel":
-    st.title("👨‍⚕️ Doctor Panel")
-    patient_id = st.number_input("Enter Patient ID", step=1, min_value=1)
-    condition = st.text_area("Enter Diagnosis / Condition")
-    
-    if st.button("Save Diagnosis & Complete Visit"):
-        update_condition(patient_id, condition)
-        st.success("✅ Condition saved. Patient marked as Done.")
-
-    st.subheader("📂 Current Queue")
-    st.dataframe(get_queue())
+        pid = add_patient(first_name, middle_name, surname, age, gender)
+        ticket = add_to_queue(pid)
+        st.success(f"✅ Ticket generated: {ticket}. Please wait for triage.")
 
 elif menu == "TV Display":
     st.title("📺 Waiting Room Display")
     st_autorefresh(interval=7000, key="tvdisplay")
-
     current = pd.read_sql("""
         SELECT q.ticket_number,
                p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
@@ -174,73 +149,187 @@ elif menu == "TV Display":
         ticket = current["ticket_number"].iloc[0]
         name = current["full_name"].iloc[0]
         destination = current["destination"].iloc[0]
-
-        # Blinking + Audio
         st.markdown(
-            f"""
-            <style>
-            .blinking {{
-              animation: blinker 1.5s linear infinite;
-              color: red;
-              font-size: 80px;
-              text-align: center;
-            }}
-            @keyframes blinker {{
-              50% {{ opacity: 0; }}
-            }}
-            </style>
-            <h1 style='text-align:center;'>Now Serving</h1>
-            <div class="blinking">Ticket #{ticket} - {name}</div>
-            <h3 style='text-align:center; color:blue;'>Proceed to {destination}</h3>
-            """, unsafe_allow_html=True
-        )
-
+            f"<h1 style='text-align:center;'>Now Serving</h1>"
+            f"<h2 style='text-align:center; color:red; animation: blinker 1s infinite;'>#{ticket} - {name}</h2>"
+            f"<h3 style='text-align:center; color:blue;'>Proceed to {destination}</h3>",
+            unsafe_allow_html=True)
         audio_file = announce_patient(ticket, name, destination)
-        audio_bytes = open(audio_file, "rb").read()
-        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
-
+        st.audio(open(audio_file, "rb").read(), format="audio/mp3", autoplay=True)
     else:
-        st.info("⏳ Waiting for the first patient to be served...")
+        st.info("⏳ Waiting for patients...")
 
-    tips = [
-        "💧 Drink at least 8 glasses of water daily.",
-        "🍎 Eat more fruits and vegetables for better immunity.",
-        "🏃‍♂️ Exercise at least 30 minutes a day.",
-        "🧘 Manage stress with deep breathing or meditation.",
-        "💉 Stay updated with your vaccinations."
-    ]
+    tips = ["💧 Drink water", "🍎 Eat fruits", "🏃‍♂️ Exercise daily", "🧘 Meditate", "💉 Get vaccinated"]
     st.markdown(f"<p style='text-align:center; font-size:20px; color:green;'>{random.choice(tips)}</p>", unsafe_allow_html=True)
 
-elif menu == "About":
-    st.title("ℹ️ About")
-    st.write("Smart Queue tracks patient flow from entry to exit with real-time updates.")
+elif menu == "Triage":
+    st.title("📋 Triage Station (Login Required)")
+    if "triage_logged" not in st.session_state:
+        st.session_state.triage_logged = False
+    if not st.session_state.triage_logged:
+        pw = st.text_input("Triage Password", type="password")
+        if st.button("Login"):
+            if pw == "triage123":
+                st.session_state.triage_logged = True
+                st.success("✅ Triage login successful")
+            else:
+                st.error("❌ Wrong password")
+    else:
+        pid = st.number_input("Patient ID", step=1, min_value=1)
+        weight = st.number_input("Weight (kg)")
+        height = st.number_input("Height (cm)")
+        bp = st.text_input("Blood Pressure")
+        if st.button("Save Triage"):
+            update_triage(pid, weight, height, bp)
+            st.success("✅ Patient triaged → Consultation")
+        if st.button("Logout"):
+            st.session_state.triage_logged = False
 
-elif menu == "Contacts":
-    st.title("📞 Contact Us")
-    st.write("Support: support@hospital.com | +254-700-123-456")
+elif menu == "Doctor Panel":
+    st.title("👨‍⚕️ Doctor Panel (Login Required)")
+    if "doctor_logged" not in st.session_state:
+        st.session_state.doctor_logged = False
+    if not st.session_state.doctor_logged:
+        pw = st.text_input("Doctor Password", type="password")
+        if st.button("Login"):
+            if pw == "doctor123":
+                st.session_state.doctor_logged = True
+                st.success("✅ Doctor login successful")
+            else:
+                st.error("❌ Wrong password")
+    else:
+        pid = st.number_input("Patient ID", step=1, min_value=1)
+        condition = st.text_area("Condition / Diagnosis")
+        destination = st.selectbox("Send to", ["Pharmacy", "Lab", "Payment"])
+        if st.button("Complete Consultation"):
+            update_doctor(pid, condition, destination)
+            st.success(f"✅ Patient sent to {destination}")
+        st.dataframe(get_queue())
+        if st.button("Logout"):
+            st.session_state.doctor_logged = False
 
-elif menu == "FAQs":
-    st.title("❓ FAQs")
-    st.write("""
-    - **How do I register?** Use the kiosk at entry.
-    - **What happens at triage?** Vitals (weight, height, BP) are measured.
-    - **Where do I wait?** Please proceed to waiting area until your ticket is called.
-    """)
+# ----------------- PHARMACY -----------------
+elif menu == "Pharmacy":
+    st.title("💊 Pharmacy Dashboard (Login Required)")
+    if "pharmacy_logged" not in st.session_state:
+        st.session_state.pharmacy_logged = False
+    if not st.session_state.pharmacy_logged:
+        pw = st.text_input("Pharmacy Password", type="password")
+        if st.button("Login"):
+            if pw == "pharmacy123":
+                st.session_state.pharmacy_logged = True
+                st.success("✅ Pharmacy login successful")
+            else:
+                st.error("❌ Wrong password")
+    else:
+        df = pd.read_sql("SELECT * FROM queue WHERE destination='Pharmacy' AND status!='done'", conn)
+        st.dataframe(df)
+        pid = st.number_input("Patient ID", step=1, min_value=1)
+        if st.button("Mark as Done"):
+            mark_done(pid, "Pharmacy")
+            st.success("✅ Patient served at Pharmacy")
+        if st.button("Logout"):
+            st.session_state.pharmacy_logged = False
 
+# ----------------- LAB -----------------
+elif menu == "Lab":
+    st.title("🧪 Lab Dashboard (Login Required)")
+    if "lab_logged" not in st.session_state:
+        st.session_state.lab_logged = False
+    if not st.session_state.lab_logged:
+        pw = st.text_input("Lab Password", type="password")
+        if st.button("Login"):
+            if pw == "lab123":
+                st.session_state.lab_logged = True
+                st.success("✅ Lab login successful")
+            else:
+                st.error("❌ Wrong password")
+    else:
+        df = pd.read_sql("SELECT * FROM queue WHERE destination='Lab' AND status!='done'", conn)
+        st.dataframe(df)
+        pid = st.number_input("Patient ID", step=1, min_value=1)
+        if st.button("Mark as Done"):
+            mark_done(pid, "Lab")
+            st.success("✅ Patient served at Lab")
+        if st.button("Logout"):
+            st.session_state.lab_logged = False
+
+# ----------------- PAYMENT -----------------
+elif menu == "Payment":
+    st.title("💵 Payment Dashboard (Login Required)")
+    if "payment_logged" not in st.session_state:
+        st.session_state.payment_logged = False
+    if not st.session_state.payment_logged:
+        pw = st.text_input("Payment Password", type="password")
+        if st.button("Login"):
+            if pw == "payment123":
+                st.session_state.payment_logged = True
+                st.success("✅ Payment login successful")
+            else:
+                st.error("❌ Wrong password")
+    else:
+        df = pd.read_sql("SELECT * FROM queue WHERE destination='Payment' AND status!='done'", conn)
+        st.dataframe(df)
+        pid = st.number_input("Patient ID", step=1, min_value=1)
+        if st.button("Mark as Done"):
+            mark_done(pid, "Payment")
+            st.success("✅ Patient cleared Payment")
+        if st.button("Logout"):
+            st.session_state.payment_logged = False
+
+# ----------------- ANALYTICS -----------------
+elif menu == "Analytics":
+    st.title("📊 Analytics Dashboard")
+    df = get_queue()
+    if not df.empty:
+        df["entry_time"] = pd.to_datetime(df["entry_time"], errors="coerce")
+        df["exit_time"] = pd.to_datetime(df["exit_time"], errors="coerce")
+        df["wait"] = (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60
+        st.metric("Average Wait Time", f"{df['wait'].mean():.1f} min")
+        fig, ax = plt.subplots()
+        df["destination"].value_counts().plot(kind="bar", ax=ax)
+        st.pyplot(fig)
+    else:
+        st.info("No data yet")
+
+# ----------------- CHATBOT -----------------
 elif menu == "Chatbot":
     st.title("🤖 Hospital Chatbot")
     faq = {
-        "how to register": "📝 Register at the kiosk at entry. You’ll get a ticket number.",
+        "register": "📝 Register at the kiosk and get a ticket.",
         "triage": "📋 Triage includes weight, height, and blood pressure checks.",
-        "consultation": "👨‍⚕️ Consultation comes after triage. The doctor will call you.",
-        "pharmacy": "💊 Pharmacy is after consultation, on the ground floor.",
+        "doctor": "👨‍⚕️ Doctor consultation follows triage.",
+        "pharmacy": "💊 Go to pharmacy after consultation.",
+        "lab": "🧪 Go to lab if doctor refers you.",
+        "payment": "💵 Finish at payment counter."
     }
-    user_q = st.text_input("Ask me something...")
-    if user_q:
-        q = user_q.lower()
-        match = get_close_matches(q, faq.keys(), n=1, cutoff=0.5)
+    q = st.text_input("Ask me something...")
+    if q:
+        match = get_close_matches(q.lower(), faq.keys(), n=1, cutoff=0.4)
         if match:
             st.write(faq[match[0]])
         else:
-            st.write("I’m still learning 🤖. Please ask the reception.")
+            st.write("I’m still learning 🤖. Please ask reception.")
 
+# ----------------- FAQ -----------------
+elif menu == "FAQs":
+    st.title("❓ Frequently Asked Questions")
+    st.write("""
+    **Q: How do I register?**  
+    A: Use the kiosk at the entrance.  
+
+    **Q: What happens at triage?**  
+    A: Vitals are recorded (weight, height, BP).  
+
+    **Q: Where do I go after the doctor?**  
+    A: You’ll be directed to Pharmacy, Lab, or Payment.  
+    """)
+
+# ----------------- CONTACTS -----------------
+elif menu == "Contacts":
+    st.title("📞 Contact Us")
+    st.markdown("""
+    **📧 Email:** [marrionwahome974@gmail.com](mailto:marrionwahome974@gmail.com)  
+    **📱 Phone:** +254111838986  
+    """)
+    st.info("We’re here to support you with any issues or inquiries.")
