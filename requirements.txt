@@ -4,3 +4,4 @@ gTTS
 streamlit-autorefresh
 openpyxl
 matplotlib
+difflib
