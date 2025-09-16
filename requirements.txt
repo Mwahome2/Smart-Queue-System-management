@@ -3,3 +3,4 @@ pandas
 gTTS
 streamlit-autorefresh
 openpyxl
+matplotlib
