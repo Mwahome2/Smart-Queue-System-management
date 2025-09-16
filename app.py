@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS patients (
 )
 ''')
 
-# Queue table with entry/exit/destination
+# Queue table
 c.execute('''
 CREATE TABLE IF NOT EXISTS queue (
     queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,6 +37,17 @@ CREATE TABLE IF NOT EXISTS queue (
     FOREIGN KEY(patient_id) REFERENCES patients(id)
 )
 ''')
+conn.commit()
+
+# --- Migration check: add missing columns if old DB exists ---
+c.execute("PRAGMA table_info(queue)")
+cols = [col[1] for col in c.fetchall()]
+if "entry_time" not in cols:
+    c.execute("ALTER TABLE queue ADD COLUMN entry_time TEXT")
+if "exit_time" not in cols:
+    c.execute("ALTER TABLE queue ADD COLUMN exit_time TEXT")
+if "destination" not in cols:
+    c.execute("ALTER TABLE queue ADD COLUMN destination TEXT")
 conn.commit()
 
 # ----------------- FUNCTIONS -----------------
@@ -56,15 +67,19 @@ def add_to_queue(patient_id, emergency, destination):
     conn.commit()
 
 def get_queue():
-    return pd.read_sql("""
-        SELECT q.queue_id,
-               p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
-               p.age, p.gender, p.condition,
-               q.emergency, q.entry_time, q.exit_time, q.destination, q.status
-        FROM queue q
-        JOIN patients p ON q.patient_id = p.id
-        ORDER BY q.emergency DESC, q.queue_id ASC
-    """, conn)
+    try:
+        return pd.read_sql("""
+            SELECT q.queue_id,
+                   p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
+                   p.age, p.gender, p.condition,
+                   q.emergency, q.entry_time, q.exit_time, q.destination, q.status
+            FROM queue q
+            JOIN patients p ON q.patient_id = p.id
+            ORDER BY q.emergency DESC, q.queue_id ASC
+        """, conn)
+    except Exception as e:
+        st.error(f"Database error: {e}")
+        return pd.DataFrame()
 
 def get_next_patient():
     c.execute("""
@@ -146,37 +161,39 @@ else:
 
 # TV display
 st.subheader("📺 Waiting Room Display")
-
 st_autorefresh(interval=5000, key="tvdisplay")
 
-current = pd.read_sql("""
-    SELECT q.queue_id,
-           p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
-           q.destination
-    FROM queue q
-    JOIN patients p ON q.patient_id = p.id
-    WHERE q.status='done'
-    ORDER BY q.queue_id DESC
-    LIMIT 1
-""", conn)
+try:
+    current = pd.read_sql("""
+        SELECT q.queue_id,
+               p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
+               q.destination
+        FROM queue q
+        JOIN patients p ON q.patient_id = p.id
+        WHERE q.status='done'
+        ORDER BY q.queue_id DESC
+        LIMIT 1
+    """, conn)
 
-if not current.empty:
-    patient_num = current["queue_id"].iloc[0]
-    patient_name = current["full_name"].iloc[0]
-    destination = current["destination"].iloc[0]
+    if not current.empty:
+        patient_num = current["queue_id"].iloc[0]
+        patient_name = current["full_name"].iloc[0]
+        destination = current["destination"].iloc[0]
 
-    st.markdown(
-        f"<h1 style='text-align:center; font-size:60px;'>Now Serving</h1>"
-        f"<h2 style='text-align:center; color:red; font-size:80px;'>#{patient_num} - {patient_name}</h2>"
-        f"<h3 style='text-align:center; color:blue;'>Proceed to {destination}</h3>",
-        unsafe_allow_html=True
-    )
+        st.markdown(
+            f"<h1 style='text-align:center; font-size:60px;'>Now Serving</h1>"
+            f"<h2 style='text-align:center; color:red; font-size:80px;'>#{patient_num} - {patient_name}</h2>"
+            f"<h3 style='text-align:center; color:blue;'>Proceed to {destination}</h3>",
+            unsafe_allow_html=True
+        )
 
-    audio_file = announce_patient(patient_num, patient_name, destination)
-    audio_bytes = open(audio_file, "rb").read()
-    st.audio(audio_bytes, format="audio/mp3", autoplay=True)
-else:
-    st.info("No patients being served at the moment.")
+        audio_file = announce_patient(patient_num, patient_name, destination)
+        audio_bytes = open(audio_file, "rb").read()
+        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+    else:
+        st.info("No patients being served at the moment.")
+except Exception as e:
+    st.error(f"Error loading TV Display: {e}")
 
 # ----------------- ANALYTICS SECTION -----------------
 st.subheader("📊 Analytics Dashboard")
@@ -217,4 +234,3 @@ if not df_all.empty:
     st.pyplot(fig2)
 else:
     st.info("No data yet for analytics.")
-
