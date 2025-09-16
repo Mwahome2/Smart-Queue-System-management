@@ -2,16 +2,14 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import datetime
+import random
 from gtts import gTTS
-import os
 from streamlit_autorefresh import st_autorefresh
-import matplotlib.pyplot as plt
 
 # ----------------- DATABASE SETUP -----------------
 conn = sqlite3.connect("hospital.db", check_same_thread=False)
 c = conn.cursor()
 
-# Patients table
 c.execute('''
 CREATE TABLE IF NOT EXISTS patients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,7 +22,6 @@ CREATE TABLE IF NOT EXISTS patients (
 )
 ''')
 
-# Queue table
 c.execute('''
 CREATE TABLE IF NOT EXISTS queue (
     queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,17 +34,6 @@ CREATE TABLE IF NOT EXISTS queue (
     FOREIGN KEY(patient_id) REFERENCES patients(id)
 )
 ''')
-conn.commit()
-
-# --- Migration check: add missing columns if old DB exists ---
-c.execute("PRAGMA table_info(queue)")
-cols = [col[1] for col in c.fetchall()]
-if "entry_time" not in cols:
-    c.execute("ALTER TABLE queue ADD COLUMN entry_time TEXT")
-if "exit_time" not in cols:
-    c.execute("ALTER TABLE queue ADD COLUMN exit_time TEXT")
-if "destination" not in cols:
-    c.execute("ALTER TABLE queue ADD COLUMN destination TEXT")
 conn.commit()
 
 # ----------------- FUNCTIONS -----------------
@@ -67,19 +53,15 @@ def add_to_queue(patient_id, emergency, destination):
     conn.commit()
 
 def get_queue():
-    try:
-        return pd.read_sql("""
-            SELECT q.queue_id,
-                   p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
-                   p.age, p.gender, p.condition,
-                   q.emergency, q.entry_time, q.exit_time, q.destination, q.status
-            FROM queue q
-            JOIN patients p ON q.patient_id = p.id
-            ORDER BY q.emergency DESC, q.queue_id ASC
-        """, conn)
-    except Exception as e:
-        st.error(f"Database error: {e}")
-        return pd.DataFrame()
+    return pd.read_sql("""
+        SELECT q.queue_id,
+               p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
+               p.age, p.gender, p.condition,
+               q.emergency, q.entry_time, q.exit_time, q.destination, q.status
+        FROM queue q
+        JOIN patients p ON q.patient_id = p.id
+        ORDER BY q.emergency DESC, q.queue_id ASC
+    """, conn)
 
 def get_next_patient():
     c.execute("""
@@ -99,22 +81,27 @@ def mark_done(queue_id):
     c.execute("UPDATE queue SET status='done', exit_time=? WHERE queue_id=?", (exit_time, queue_id))
     conn.commit()
 
-# Function to generate audio announcement
-def announce_patient(patient_number, name, destination):
-    text = f"Now serving patient number {patient_number}, {name}. Please proceed to {destination}."
-    tts = gTTS(text=text, lang="en")
-    filename = "announcement.mp3"
-    tts.save(filename)
-    return filename
+# ----------------- STREAMLIT APP -----------------
+st.set_page_config(page_title="Smart Queue System", page_icon="🏥", layout="wide")
 
-# ----------------- STREAMLIT DASHBOARD -----------------
-st.title("🏥 Smart Queue & Patient Management Dashboard")
+menu = st.sidebar.radio("📌 Navigation", 
+                        ["Home", "Add Patient (Kiosk)", "Register Patient (Triage)", 
+                         "Doctor Panel", "TV Display", "About", "Contacts", "FAQs", "Chatbot"])
 
-col1, col2 = st.columns(2)
+# ----------------- PAGES -----------------
+if menu == "Home":
+    st.title("🏥 Welcome to Smart Queue Management")
+    st.write("""
+    This system streamlines hospital patient flow:
+    - Self-service **Add Patient** kiosk at entry
+    - **Triage Staff** register patients into the queue
+    - **Doctors** call patients via Doctor Panel
+    - Waiting room shows updates on **TV Display**
+    """)
+    st.success("✅ Making hospital visits faster and stress-free!")
 
-# Add new patient
-with col1:
-    st.subheader("➕ Add New Patient")
+elif menu == "Add Patient (Kiosk)":
+    st.title("📝 Patient Self-Registration (Kiosk)")
     first_name = st.text_input("First Name")
     middle_name = st.text_input("Middle Name")
     surname = st.text_input("Surname")
@@ -124,48 +111,83 @@ with col1:
 
     if st.button("Save Patient"):
         add_patient(first_name, middle_name, surname, age, gender, condition)
-        st.success("✅ Patient added successfully")
+        st.success("✅ Patient added successfully. Please proceed to Triage.")
 
-# Register to queue
-with col2:
-    st.subheader("📝 Register Patient to Queue")
-    first_name = st.text_input("Enter First Name for Queue")
-    surname = st.text_input("Enter Surname for Queue")
-    emergency = st.checkbox("Emergency Case?")
-    destination = st.selectbox("Destination", ["Consultation", "Lab", "Pharmacy", "Other"])
-    if st.button("Register to Queue"):
-        patient = get_patient_by_name(first_name, surname)
-        if patient:
-            add_to_queue(patient[0], emergency, destination)
-            st.success(f"✅ {first_name} {surname} added to queue for {destination}")
+elif menu == "Register Patient (Triage)":
+    st.title("📋 Register Patient to Queue (Triage Use)")
+
+    # Session state for triage login
+    if "triage_logged_in" not in st.session_state:
+        st.session_state.triage_logged_in = False
+
+    if not st.session_state.triage_logged_in:
+        password = st.text_input("Enter Triage Password", type="password")
+        if st.button("Login as Triage"):
+            if password == "triage123":  # 🔑 set your triage password
+                st.session_state.triage_logged_in = True
+                st.success("✅ Triage login successful")
+            else:
+                st.error("❌ Incorrect password")
+    else:
+        st.success("🔓 Triage Staff Logged In")
+
+        first_name = st.text_input("First Name")
+        surname = st.text_input("Surname")
+        emergency = st.checkbox("Emergency Case?")
+        destination = st.selectbox("Destination", ["Consultation", "Lab", "Pharmacy", "Other"])
+
+        if st.button("Register to Queue"):
+            patient = get_patient_by_name(first_name, surname)
+            if patient:
+                add_to_queue(patient[0], emergency, destination)
+                st.success(f"✅ {first_name} {surname} registered for {destination}")
+            else:
+                st.error("❌ Patient not found. Please use the Kiosk first.")
+
+        if st.button("Logout Triage"):
+            st.session_state.triage_logged_in = False
+            st.warning("Triage staff logged out")
+
+elif menu == "Doctor Panel":
+    st.title("👨‍⚕️ Doctor Panel (Login Required)")
+
+    # Session state for doctor login
+    if "doctor_logged_in" not in st.session_state:
+        st.session_state.doctor_logged_in = False
+
+    if not st.session_state.doctor_logged_in:
+        password = st.text_input("Enter Doctor Password", type="password")
+        if st.button("Login as Doctor"):
+            if password == "doctor123":  # 🔑 set your doctor password
+                st.session_state.doctor_logged_in = True
+                st.success("✅ Doctor login successful")
+            else:
+                st.error("❌ Incorrect password")
+    else:
+        st.success("🔓 Doctor Logged In")
+
+        df_queue = get_queue()
+        st.subheader("🧾 Current Queue")
+        if not df_queue.empty:
+            st.dataframe(df_queue)
+            if st.button("Next Patient"):
+                patient = get_next_patient()
+                if patient:
+                    st.success(f"Now seeing: {patient[1]} (Age {patient[2]}, {patient[3]}) - Condition: {patient[4]} → Destination: {patient[5]}")
+                    mark_done(patient[0])
         else:
-            st.error("❌ Patient not found. Please add them first.")
+            st.info("No patients in queue")
 
-# Patient records
-st.subheader("📂 Patient Records")
-df_patients = pd.read_sql("SELECT id, first_name, middle_name, surname, age, gender, condition FROM patients", conn)
-st.dataframe(df_patients)
+        if st.button("Logout Doctor"):
+            st.session_state.doctor_logged_in = False
+            st.warning("Doctor logged out")
 
-# Doctor view
-st.subheader("👨‍⚕️ Doctor's Panel")
-df_queue = get_queue()
-if not df_queue.empty:
-    st.dataframe(df_queue)
-    if st.button("Next Patient"):
-        patient = get_next_patient()
-        if patient:
-            st.success(f"Now seeing: {patient[1]} (Age {patient[2]}, {patient[3]}) - Condition: {patient[4]} → Destination: {patient[5]}")
-            mark_done(patient[0])
-else:
-    st.info("No patients in queue")
+elif menu == "TV Display":
+    st.title("📺 Waiting Room Display")
+    st_autorefresh(interval=7000, key="tvdisplay")
 
-# TV display
-st.subheader("📺 Waiting Room Display")
-st_autorefresh(interval=5000, key="tvdisplay")
-
-try:
     current = pd.read_sql("""
-        SELECT q.queue_id,
+        SELECT q.queue_id, 
                p.first_name || ' ' || p.middle_name || ' ' || p.surname as full_name,
                q.destination
         FROM queue q
@@ -181,56 +203,44 @@ try:
         destination = current["destination"].iloc[0]
 
         st.markdown(
-            f"<h1 style='text-align:center; font-size:60px;'>Now Serving</h1>"
-            f"<h2 style='text-align:center; color:red; font-size:80px;'>#{patient_num} - {patient_name}</h2>"
+            f"<h1 style='text-align:center;'>Now Serving</h1>"
+            f"<h2 style='text-align:center; color:red;'>#{patient_num} - {patient_name}</h2>"
             f"<h3 style='text-align:center; color:blue;'>Proceed to {destination}</h3>",
             unsafe_allow_html=True
         )
-
-        audio_file = announce_patient(patient_num, patient_name, destination)
-        audio_bytes = open(audio_file, "rb").read()
-        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
     else:
-        st.info("No patients being served at the moment.")
-except Exception as e:
-    st.error(f"Error loading TV Display: {e}")
+        st.info("⏳ Waiting for the first patient to be served...")
 
-# ----------------- ANALYTICS SECTION -----------------
-st.subheader("📊 Analytics Dashboard")
+    # Health tips rotation
+    tips = [
+        "💧 Drink at least 8 glasses of water daily.",
+        "🍎 Eat more fruits and vegetables for better immunity.",
+        "🏃‍♂️ Exercise at least 30 minutes a day.",
+        "🧘 Manage stress with deep breathing or meditation.",
+        "💉 Stay updated with your vaccinations."
+    ]
+    st.markdown(f"<p style='text-align:center; font-size:20px; color:green;'>{random.choice(tips)}</p>", unsafe_allow_html=True)
 
-df_all = pd.read_sql("SELECT * FROM queue", conn)
+elif menu == "About":
+    st.title("ℹ️ About")
+    st.write("Smart Queue is designed to improve hospital efficiency and patient experience.")
 
-if not df_all.empty:
-    # Patients per destination
-    st.write("### Patients per Destination")
-    dest_counts = df_all["destination"].value_counts()
-    fig1, ax1 = plt.subplots()
-    dest_counts.plot(kind="bar", ax=ax1)
-    ax1.set_ylabel("Number of Patients")
-    ax1.set_xlabel("Destination")
-    st.pyplot(fig1)
+elif menu == "Contacts":
+    st.title("📞 Contact Us")
+    st.write("For support, reach us at: support@hospital.com | +254-700-123-456")
 
-    # Average waiting time
-    st.write("### Average Waiting Time (minutes)")
-    df_done = df_all.dropna(subset=["entry_time", "exit_time"]).copy()
-    if not df_done.empty:
-        df_done["entry_time"] = pd.to_datetime(df_done["entry_time"])
-        df_done["exit_time"] = pd.to_datetime(df_done["exit_time"])
-        df_done["wait_minutes"] = (df_done["exit_time"] - df_done["entry_time"]).dt.total_seconds() / 60
-        avg_wait = df_done["wait_minutes"].mean()
-        st.metric("Avg Waiting Time", f"{avg_wait:.1f} minutes")
-    else:
-        st.info("No completed patients to calculate waiting time.")
+elif menu == "FAQs":
+    st.title("❓ Frequently Asked Questions")
+    st.write("- **How do I register?** Use the kiosk on entry.\n- **What if I need urgent care?** Select Emergency at triage.\n- **Where do I wait?** Please proceed to the waiting area until your number is called.")
 
-    # Queue load per hour
-    st.write("### Queue Load Over Time")
-    df_all["entry_time"] = pd.to_datetime(df_all["entry_time"], errors="coerce")
-    df_all["hour"] = df_all["entry_time"].dt.hour
-    load = df_all.groupby("hour").size()
-    fig2, ax2 = plt.subplots()
-    load.plot(kind="line", marker="o", ax=ax2)
-    ax2.set_ylabel("Patients Registered")
-    ax2.set_xlabel("Hour of Day")
-    st.pyplot(fig2)
-else:
-    st.info("No data yet for analytics.")
+elif menu == "Chatbot":
+    st.title("🤖 Hospital Chatbot")
+    user_q = st.text_input("Ask me something...")
+    if user_q:
+        if "time" in user_q.lower():
+            st.write("⏰ We are open 24/7.")
+        elif "lab" in user_q.lower():
+            st.write("🧪 The Lab is located on the 2nd floor.")
+        else:
+            st.write("I’m still learning. Please ask the reception for more details.")
+
