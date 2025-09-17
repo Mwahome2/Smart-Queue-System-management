@@ -1,4 +1,4 @@
-# app.py - Full Smart Queue System (complete)
+# app.py - Full Smart Queue System (all tabs + payment_type migration + analytics)
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -15,25 +15,58 @@ DB_PATH = "hospital.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
 
-# Helper: check columns for a table
 def table_columns(table):
     c.execute(f"PRAGMA table_info({table})")
-    return [row[1] for row in c.fetchall()]
+    return [r[1] for r in c.fetchall()]
 
-# If patients table exists with old schema (name) -> migrate to new schema
-existing_tables = []
+# Create or migrate patients table
 c.execute("SELECT name FROM sqlite_master WHERE type='table'")
 existing_tables = [r[0] for r in c.fetchall()]
 
 if "patients" in existing_tables:
-    cols = table_columns("patients")
-    if "name" in cols and "first_name" not in cols:
-        # rename and migrate rows with simple split
+    pcols = table_columns("patients")
+    if "name" in pcols and "first_name" not in pcols:
+        # migrate old patients -> new structure
         c.execute("ALTER TABLE patients RENAME TO patients_old")
         conn.commit()
-
         c.execute('''
-        CREATE TABLE patients (
+            CREATE TABLE IF NOT EXISTS patients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                first_name TEXT,
+                middle_name TEXT,
+                surname TEXT,
+                age INTEGER,
+                gender TEXT,
+                weight REAL,
+                height REAL,
+                bp TEXT,
+                condition TEXT
+            )
+        ''')
+        conn.commit()
+        c.execute("SELECT id, name, age, gender, condition FROM patients_old")
+        for row in c.fetchall():
+            _, fullname, age, gender, condition = row
+            if fullname and isinstance(fullname, str):
+                parts = fullname.strip().split()
+                if len(parts) == 1:
+                    first, middle, surname = parts[0], "", ""
+                elif len(parts) == 2:
+                    first, middle, surname = parts[0], "", parts[1]
+                else:
+                    first, middle, surname = parts[0], " ".join(parts[1:-1]), parts[-1]
+            else:
+                first = middle = surname = ""
+            c.execute("""
+                INSERT INTO patients (first_name, middle_name, surname, age, gender, condition)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (first, middle, surname, age, gender, condition))
+        conn.commit()
+        c.execute("DROP TABLE IF EXISTS patients_old")
+        conn.commit()
+else:
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS patients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             first_name TEXT,
             middle_name TEXT,
@@ -45,82 +78,47 @@ if "patients" in existing_tables:
             bp TEXT,
             condition TEXT
         )
-        ''')
-        conn.commit()
-
-        # Copy rows from old table, split 'name' into parts
-        c.execute("SELECT id, name, age, gender, condition FROM patients_old")
-        old_rows = c.fetchall()
-        for row in old_rows:
-            _, fullname, age, gender, condition = row
-            if fullname and isinstance(fullname, str):
-                parts = fullname.strip().split()
-                first = parts[0] if len(parts) >= 1 else ""
-                surname = parts[-1] if len(parts) >= 2 else ""
-                middle = " ".join(parts[1:-1]) if len(parts) > 2 else ""
-            else:
-                first = middle = surname = ""
-            c.execute("""
-                INSERT INTO patients (first_name, middle_name, surname, age, gender, condition)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (first, middle, surname, age, gender, condition))
-        conn.commit()
-
-        # Optionally drop old table
-        c.execute("DROP TABLE IF EXISTS patients_old")
-        conn.commit()
-else:
-    # create fresh patients table if not exists
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS patients (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        first_name TEXT,
-        middle_name TEXT,
-        surname TEXT,
-        age INTEGER,
-        gender TEXT,
-        weight REAL,
-        height REAL,
-        bp TEXT,
-        condition TEXT
-    )
     ''')
     conn.commit()
 
-# Ensure queue table exists and has the new columns
+# Create or migrate queue table
 if "queue" not in existing_tables:
     c.execute('''
-    CREATE TABLE IF NOT EXISTS queue (
-        queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        patient_id INTEGER,
-        ticket_number TEXT,
-        entry_time TEXT,
-        exit_time TEXT,
-        location TEXT,
-        status TEXT DEFAULT "waiting",
-        destination TEXT,
-        FOREIGN KEY(patient_id) REFERENCES patients(id)
-    )
+        CREATE TABLE IF NOT EXISTS queue (
+            queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER,
+            ticket_number TEXT,
+            entry_time TEXT,
+            exit_time TEXT,
+            location TEXT,
+            status TEXT DEFAULT "waiting",
+            destination TEXT,
+            payment_type TEXT,
+            FOREIGN KEY(patient_id) REFERENCES patients(id)
+        )
     ''')
     conn.commit()
 else:
-    # if old queue schema uses 'time' instead of 'entry_time', migrate
     qcols = table_columns("queue")
-    # add missing columns using ALTER TABLE (safe)
-    needed = ["ticket_number", "entry_time", "exit_time", "location", "destination"]
-    for col in needed:
+    # add columns if missing
+    for col_def in [("ticket_number", "TEXT"), ("entry_time", "TEXT"), ("exit_time", "TEXT"),
+                    ("location", "TEXT"), ("destination", "TEXT"), ("payment_type", "TEXT")]:
+        col, dtype = col_def
         if col not in qcols:
-            c.execute(f"ALTER TABLE queue ADD COLUMN {col} TEXT")
+            try:
+                c.execute(f"ALTER TABLE queue ADD COLUMN {col} {dtype}")
+            except Exception:
+                pass
+    # if old 'time' exists, copy it to entry_time where entry_time is null
+    if "time" in qcols and "entry_time" in qcols:
+        try:
+            c.execute("UPDATE queue SET entry_time = time WHERE (entry_time IS NULL OR entry_time='') AND time IS NOT NULL")
+        except Exception:
+            pass
     conn.commit()
-    # if old `time` exists and entry_time empty -> copy
-    if "time" in qcols:
-        # copy time->entry_time only where entry_time is null
-        c.execute("UPDATE queue SET entry_time = time WHERE (entry_time IS NULL OR entry_time='') AND time IS NOT NULL")
-        conn.commit()
 
 # ----------------- UTILS -----------------
 def generate_ticket():
-    # ticket uses timestamp to reduce collisions
     return f"T{datetime.datetime.now().strftime('%y%m%d%H%M%S%f')[-12:]}"
 
 def split_fullname(fullname):
@@ -134,12 +132,12 @@ def split_fullname(fullname):
     else:
         return parts[0], " ".join(parts[1:-1]), parts[-1]
 
-def safe_get(df, col, default=""):
+def safe_remove_file(path):
     try:
-        val = df[col]
-        return val
+        if os.path.exists(path):
+            os.remove(path)
     except Exception:
-        return default
+        pass
 
 # ----------------- CRUD / FLOW FUNCTIONS -----------------
 def add_patient(first_name, middle_name, surname, age, gender):
@@ -149,9 +147,8 @@ def add_patient(first_name, middle_name, surname, age, gender):
     return c.lastrowid
 
 def update_patient(pid, first_name, middle_name, surname, age, gender, weight=None, height=None, bp=None, condition=None):
-    # Allow None values
     c.execute("""
-        UPDATE patients 
+        UPDATE patients
         SET first_name=?, middle_name=?, surname=?, age=?, gender=?, weight=?, height=?, bp=?, condition=?
         WHERE id=?
     """, (first_name, middle_name, surname, age, gender, weight, height, bp, condition, pid))
@@ -161,36 +158,40 @@ def add_to_queue(patient_id, destination=None):
     ticket = generate_ticket()
     entry_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     loc = "Entry"
+    dest = destination or "Triage"
     c.execute("INSERT INTO queue (patient_id, ticket_number, entry_time, location, destination, status) VALUES (?, ?, ?, ?, ?, ?)",
-              (patient_id, ticket, entry_time, loc, destination or "Triage", "waiting"))
+              (patient_id, ticket, entry_time, loc, dest, "waiting"))
     conn.commit()
     return ticket
 
-def update_triage(patient_id, weight, height, bp):
-    # update patient vitals and move queue location to 'Triage' and destination -> Consultation
+def update_triage_by_ids(patient_id, queue_id=None, weight=None, height=None, bp=None):
     c.execute("UPDATE patients SET weight=?, height=?, bp=? WHERE id=?", (weight, height, bp, patient_id))
+    # update queue row(s)
     c.execute("UPDATE queue SET location='Triage', destination='Consultation' WHERE patient_id=?", (patient_id,))
     conn.commit()
 
-def update_doctor(patient_id, condition, destination):
-    # record diagnosis and forward to destination (Pharmacy/Lab/Payment). status remains 'waiting' until destination marks done.
+def update_doctor_by_ids(patient_id, condition, destination):
     c.execute("UPDATE patients SET condition=? WHERE id=?", (condition, patient_id))
     c.execute("UPDATE queue SET location='Doctor', destination=?, status='waiting' WHERE patient_id=?", (destination, patient_id))
     conn.commit()
 
-def mark_done_by_queue(queue_id, section):
-    # mark a queue row as done (used by Pharmacy/Lab/Payment). set exit_time
+def mark_done_by_queue(queue_id, section, payment_type=None):
     exit_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("UPDATE queue SET location=?, status='done', exit_time=? WHERE queue_id=?", (section, exit_time, queue_id))
+    if section == "Payment" and payment_type:
+        c.execute("UPDATE queue SET location=?, status='done', exit_time=?, payment_type=? WHERE queue_id=?",
+                  (section, exit_time, payment_type, queue_id))
+    else:
+        c.execute("UPDATE queue SET location=?, status='done', exit_time=? WHERE queue_id=?",
+                  (section, exit_time, queue_id))
     conn.commit()
 
 def get_queue_df():
     try:
         return pd.read_sql("""
             SELECT q.queue_id, q.patient_id, q.ticket_number,
-                   p.first_name || ' ' || IFNULL(p.middle_name,'') || ' ' || IFNULL(p.surname,'') as full_name,
+                   COALESCE(p.first_name,'') || ' ' || COALESCE(p.middle_name,'') || ' ' || COALESCE(p.surname,'') as full_name,
                    p.age, p.gender, p.weight, p.height, p.bp, p.condition,
-                   q.location, q.status, q.destination, q.entry_time, q.exit_time
+                   q.location, q.status, q.destination, q.payment_type, q.entry_time, q.exit_time
             FROM queue q
             LEFT JOIN patients p ON q.patient_id = p.id
             ORDER BY q.queue_id ASC
@@ -200,17 +201,22 @@ def get_queue_df():
         return pd.DataFrame()
 
 def announce_patient(ticket, name, destination):
-    text = f"Now serving ticket number {ticket}, {name}. Please proceed to {destination}."
-    tts = gTTS(text=text, lang="en")
-    fname = "announcement.mp3"
-    tts.save(fname)
-    return fname
+    try:
+        text = f"Now serving ticket number {ticket}, {name}. Please proceed to {destination}."
+        tts = gTTS(text=text, lang="en")
+        filename = "announcement.mp3"
+        tts.save(filename)
+        return filename
+    except Exception as e:
+        return None
 
 # ----------------- STREAMLIT UI -----------------
 st.set_page_config(page_title="Smart Queue System", page_icon="🏥", layout="wide")
-menu = st.sidebar.radio("📌 Navigation",
-                        ["Home", "About", "Kiosk (Entry)", "TV Display", "Triage", "Doctor Panel",
-                         "Pharmacy", "Lab", "Payment", "Patient Records", "Analytics", "Chatbot", "FAQs", "Contacts"])
+
+menu = st.sidebar.radio("📌 Navigation", [
+    "Home", "About", "Kiosk (Entry)", "TV Display", "Triage", "Doctor Panel",
+    "Pharmacy", "Lab", "Payment", "Patient Records", "Analytics", "Chatbot", "FAQs", "Contacts"
+])
 
 # ---------- HOME ----------
 if menu == "Home":
@@ -223,7 +229,6 @@ if menu == "Home":
         st.markdown("- Doctor records condition and assigns destination.")
         st.markdown("- Destination staff (Pharmacy/Lab/Payment) mark patients done.")
     with col2:
-        st.write("Quick stats")
         qdf = get_queue_df()
         st.metric("Total Tickets", len(qdf))
         st.metric("Waiting", int((qdf['status'] == 'waiting').sum() if not qdf.empty else 0))
@@ -258,10 +263,10 @@ elif menu == "TV Display":
     st.title("📺 Waiting Room Display")
     st_autorefresh(interval=7000, key="tvdisplay")
 
-    # Choose next to call: earliest waiting queue (status='waiting')
+    # Show the next waiting patient (status='waiting'), earliest queue_id
     next_df = pd.read_sql("""
         SELECT q.queue_id, q.ticket_number,
-               p.first_name || ' ' || IFNULL(p.middle_name,'') || ' ' || IFNULL(p.surname,'') as full_name,
+               COALESCE(p.first_name,'') || ' ' || COALESCE(p.middle_name,'') || ' ' || COALESCE(p.surname,'') as full_name,
                q.destination
         FROM queue q
         LEFT JOIN patients p ON q.patient_id = p.id
@@ -274,7 +279,8 @@ elif menu == "TV Display":
         ticket = next_df["ticket_number"].iloc[0]
         name = next_df["full_name"].iloc[0] or "Patient"
         destination = next_df["destination"].iloc[0] if next_df["destination"].iloc[0] else "Triage"
-        # Animated display
+
+        # CSS animation
         st.markdown("""
             <style>
             @keyframes blinker { 50% { opacity: 0; } }
@@ -288,23 +294,21 @@ elif menu == "TV Display":
         st.markdown(f"<div class='blinking'>Ticket {ticket} — {name}</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='tv-sub'>Please proceed to {destination}</div>", unsafe_allow_html=True)
 
-        # audio announcement (generate/play)
+        # Audio
+        audio_file = None
         try:
             audio_file = announce_patient(ticket, name, destination)
-            audio_bytes = open(audio_file, "rb").read()
-            st.audio(audio_bytes, format="audio/mp3", autoplay=True)
-            # remove file to keep workspace clean
-            try:
-                os.remove(audio_file)
-            except Exception:
-                pass
-        except Exception as e:
+            if audio_file:
+                audio_bytes = open(audio_file, "rb").read()
+                st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+        except Exception:
             st.warning("Audio announcement unavailable.")
-            st.write(f"(debug: {e})")
+        finally:
+            if audio_file:
+                safe_remove_file(audio_file)
     else:
         st.info("⏳ No waiting patients at the moment. Please relax and enjoy health tips.")
 
-    # rotating health tips / small animation
     tips = [
         "💧 Drink at least 8 glasses of water daily.",
         "🍎 Eat more fruits and vegetables for better immunity.",
@@ -331,7 +335,6 @@ elif menu == "Triage":
     else:
         st.subheader("Triage - record vitals")
         qdf = get_queue_df()
-        # show waiting patients in Entry or Triage
         waiting = qdf[(qdf['status'] == 'waiting') & (qdf['location'].isin(['Entry','Triage']))]
         st.write("Patients waiting for triage:")
         st.dataframe(waiting[["queue_id","ticket_number","patient_id","full_name","location","entry_time"]])
@@ -344,8 +347,7 @@ elif menu == "Triage":
             bp = st.text_input("BP (e.g., 120/80)")
             triage_submit = st.form_submit_button("Save Triage Data & Move to Consultation")
             if triage_submit:
-                # update triage info and queue location
-                update_triage(int(pid), float(weight), float(height), bp)
+                update_triage_by_ids(int(pid), int(qid), float(weight), float(height), bp)
                 st.success("✅ Triage saved. Patient moved to Consultation queue.")
 
         if st.button("Logout Triage"):
@@ -369,7 +371,7 @@ elif menu == "Doctor Panel":
     else:
         st.subheader("Patients waiting for consultation")
         qdf = get_queue_df()
-        consult_wait = qdf[(qdf['status']=='waiting') & (qdf['destination'].isin(['Consultation', None]))]
+        consult_wait = qdf[(qdf['status']=='waiting') & (qdf['destination'].isin(['Consultation', None, 'Triage']))]
         st.dataframe(consult_wait[["queue_id","ticket_number","patient_id","full_name","entry_time"]])
 
         with st.form("doctor_form"):
@@ -379,7 +381,7 @@ elif menu == "Doctor Panel":
             destination = st.selectbox("Send patient to", ["Pharmacy", "Lab", "Payment"])
             doctor_submit = st.form_submit_button("Complete Consultation & Forward")
             if doctor_submit:
-                update_doctor(int(pid), condition, destination)
+                update_doctor_by_ids(int(pid), condition, destination)
                 st.success(f"✅ Patient forwarded to {destination}")
 
         if st.button("Logout Doctor"):
@@ -402,9 +404,15 @@ elif menu == "Pharmacy":
                 st.error("❌ Wrong password")
     else:
         st.subheader("Patients to serve at Pharmacy")
-        df = pd.read_sql("SELECT q.queue_id, q.patient_id, q.ticket_number, q.destination, p.first_name||' '||IFNULL(p.surname,'') as name FROM queue q LEFT JOIN patients p ON q.patient_id=p.id WHERE q.destination='Pharmacy' AND q.status!='done' ORDER BY q.queue_id", conn)
+        df = pd.read_sql("""
+            SELECT q.queue_id, q.patient_id, q.ticket_number, q.destination,
+                   COALESCE(p.first_name,'') || ' ' || COALESCE(p.surname,'') as name
+            FROM queue q LEFT JOIN patients p ON q.patient_id=p.id
+            WHERE q.destination='Pharmacy' AND q.status!='done'
+            ORDER BY q.queue_id
+        """, conn)
         st.dataframe(df)
-        qid = st.number_input("Queue ID to mark done", min_value=1, step=1)
+        qid = st.number_input("Queue ID to mark done (Pharmacy)", min_value=1, step=1)
         if st.button("Mark Pharmacy Done"):
             mark_done_by_queue(int(qid), "Pharmacy")
             st.success("✅ Marked as done at Pharmacy")
@@ -427,7 +435,13 @@ elif menu == "Lab":
                 st.error("❌ Wrong password")
     else:
         st.subheader("Patients to serve at Lab")
-        df = pd.read_sql("SELECT q.queue_id, q.patient_id, q.ticket_number, q.destination, p.first_name||' '||IFNULL(p.surname,'') as name FROM queue q LEFT JOIN patients p ON q.patient_id=p.id WHERE q.destination='Lab' AND q.status!='done' ORDER BY q.queue_id", conn)
+        df = pd.read_sql("""
+            SELECT q.queue_id, q.patient_id, q.ticket_number, q.destination,
+                   COALESCE(p.first_name,'') || ' ' || COALESCE(p.surname,'') as name
+            FROM queue q LEFT JOIN patients p ON q.patient_id=p.id
+            WHERE q.destination='Lab' AND q.status!='done'
+            ORDER BY q.queue_id
+        """, conn)
         st.dataframe(df)
         qid = st.number_input("Queue ID to mark done (Lab)", min_value=1, step=1)
         if st.button("Mark Lab Done"):
@@ -451,26 +465,34 @@ elif menu == "Payment":
             else:
                 st.error("❌ Wrong password")
     else:
-        st.subheader("Patients to clear Payment")
-        df = pd.read_sql("SELECT q.queue_id, q.patient_id, q.ticket_number, q.destination, p.first_name||' '||IFNULL(p.surname,'') as name FROM queue q LEFT JOIN patients p ON q.patient_id=p.id WHERE q.destination='Payment' AND q.status!='done' ORDER BY q.queue_id", conn)
+        st.subheader("Patients Awaiting Payment")
+        df = pd.read_sql("""
+            SELECT q.queue_id, q.patient_id, q.ticket_number, q.destination, q.payment_type,
+                   COALESCE(p.first_name,'') || ' ' || COALESCE(p.surname,'') as name
+            FROM queue q LEFT JOIN patients p ON q.patient_id=p.id
+            WHERE q.destination='Payment' AND q.status!='done'
+            ORDER BY q.queue_id
+        """, conn)
         st.dataframe(df)
-        qid = st.number_input("Queue ID to mark done (Payment)", min_value=1, step=1)
+
+        qid = st.number_input("Queue ID to process (Payment)", min_value=1, step=1)
+        pay_type = st.radio("Select Payment Type", ["SHA", "Other"], index=1)
         if st.button("Mark Payment Done"):
-            mark_done_by_queue(int(qid), "Payment")
-            st.success("✅ Marked as done at Payment")
+            mark_done_by_queue(int(qid), "Payment", payment_type=pay_type)
+            st.success(f"✅ Patient payment recorded as {pay_type}")
         if st.button("Logout Payment"):
             st.session_state.payment_logged = False
 
 # ---------- PATIENT RECORDS ----------
 elif menu == "Patient Records":
     st.title("📂 Patient Records")
-    # Search bar
+
     search = st.text_input("Search by First name / Surname / Ticket (partial OK)")
     qdf = get_queue_df()
     pdf = pd.read_sql("SELECT * FROM patients", conn)
+
     if search:
         term = f"%{search.strip().lower()}%"
-        # search both patients and queue
         res_pat = pd.read_sql("SELECT * FROM patients WHERE lower(first_name) LIKE ? OR lower(surname) LIKE ?", conn, params=(term,term))
         res_queue = pd.read_sql("SELECT q.queue_id, q.ticket_number, p.* FROM queue q LEFT JOIN patients p ON q.patient_id=p.id WHERE lower(q.ticket_number) LIKE ?", conn, params=(term,))
         st.write("Patients matching name:")
@@ -491,7 +513,6 @@ elif menu == "Patient Records":
         st.dataframe(new_df.head())
 
         if st.button("Save Uploaded Data"):
-            # Expect columns: first_name/middle_name/surname/age/gender/weight/height/bp/condition
             for _, row in new_df.iterrows():
                 # support full 'name' column by splitting
                 if "name" in row and pd.notna(row["name"]) and ("first_name" not in row or pd.isna(row.get("first_name"))):
@@ -502,7 +523,6 @@ elif menu == "Patient Records":
                     sn = row.get("surname", "") or ""
                 age = int(row.get("age", 0)) if pd.notna(row.get("age", None)) else 0
                 gender = row.get("gender", "") or ""
-                # Check existence by name+age
                 c.execute("SELECT id FROM patients WHERE first_name=? AND surname=? AND age=?", (fn, sn, age))
                 existing = c.fetchone()
                 if existing:
@@ -538,31 +558,36 @@ elif menu == "Analytics":
     if not df.empty:
         df["entry_time"] = pd.to_datetime(df["entry_time"], errors="coerce")
         df["exit_time"] = pd.to_datetime(df["exit_time"], errors="coerce")
-        # Average wait uses only completed visits
-        done = df.dropna(subset=["entry_time", "exit_time"]).copy()
+        done = df.dropna(subset=["entry_time","exit_time"]).copy()
         if not done.empty:
             done["wait_minutes"] = (done["exit_time"] - done["entry_time"]).dt.total_seconds() / 60
             st.metric("Average Wait Time (completed)", f"{done['wait_minutes'].mean():.1f} min")
-            # Patients per destination chart
+
+            # Patients per destination (bar)
             fig1, ax1 = plt.subplots()
             done["destination"].fillna("Unknown").value_counts().plot(kind="bar", ax=ax1)
             ax1.set_ylabel("Number of patients")
             st.pyplot(fig1)
+
+            # SHA vs Other pie
+            if "payment_type" in done.columns:
+                fig2, ax2 = plt.subplots()
+                done["payment_type"].fillna("Unknown").value_counts().plot(kind="pie", autopct="%1.1f%%", ax=ax2)
+                ax2.set_ylabel("")
+                st.pyplot(fig2)
         else:
             st.info("No completed records to compute average wait time yet.")
 
-        # Queue load over time (entry hour)
+        # Queue load by hour
         df["entry_time"] = pd.to_datetime(df["entry_time"], errors="coerce")
         df["hour"] = df["entry_time"].dt.hour
         load = df.groupby("hour").size()
         if not load.empty:
-            fig2, ax2 = plt.subplots()
-            load.plot(kind="line", marker="o", ax=ax2)
-            ax2.set_xlabel("Hour of day")
-            ax2.set_ylabel("Number of arrivals")
-            st.pyplot(fig2)
-        else:
-            st.info("Not enough arrival data for hourly chart.")
+            fig3, ax3 = plt.subplots()
+            load.plot(kind="line", marker="o", ax=ax3)
+            ax3.set_xlabel("Hour of day")
+            ax3.set_ylabel("Number of arrivals")
+            st.pyplot(fig3)
     else:
         st.info("No queue data yet for analytics.")
 
@@ -576,7 +601,7 @@ elif menu == "Chatbot":
         "consultation": "👨‍⚕️ Consultations happen after triage. The doctor will call you.",
         "pharmacy": "💊 Pharmacy is located after consultation.",
         "lab": "🧪 Lab is on site; doctor will refer if needed.",
-        "payment": "💵 Payment counter is at the exit; please proceed there when prompted."
+        "payment": "💵 Payment counter is at exit; choose SHA or Other as appropriate."
     }
     q = st.text_input("Ask me something...")
     if q:
@@ -608,10 +633,3 @@ elif menu == "Contacts":
     **📱 Phone:** +254111838986  
     """)
     st.info("We’re here to support you with any issues or inquiries.")
-
-
-
-
-
-  
-
