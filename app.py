@@ -52,6 +52,14 @@ def add_patient(first_name, middle_name, surname, age, gender):
     conn.commit()
     return c.lastrowid
 
+def update_patient(pid, first_name, middle_name, surname, age, gender, weight=None, height=None, bp=None, condition=None):
+    c.execute("""
+        UPDATE patients 
+        SET first_name=?, middle_name=?, surname=?, age=?, gender=?, weight=?, height=?, bp=?, condition=?
+        WHERE id=?
+    """, (first_name, middle_name, surname, age, gender, weight, height, bp, condition, pid))
+    conn.commit()
+
 def add_to_queue(patient_id):
     ticket = generate_ticket()
     entry_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -101,7 +109,7 @@ st.set_page_config(page_title="Smart Queue System", page_icon="🏥", layout="wi
 
 menu = st.sidebar.radio("📌 Navigation", 
     ["Home", "About", "Kiosk (Entry)", "TV Display", "Triage", "Doctor Panel", 
-     "Pharmacy", "Lab", "Payment", "Analytics", "Chatbot", "FAQs", "Contacts"])
+     "Pharmacy", "Lab", "Payment", "Patient Records", "Analytics", "Chatbot", "FAQs", "Contacts"])
 
 # ----------------- PAGES -----------------
 if menu == "Home":
@@ -151,7 +159,7 @@ elif menu == "TV Display":
         destination = current["destination"].iloc[0] if current["destination"].iloc[0] else "Triage"
         st.markdown(
             f"<h1 style='text-align:center;'>Now Serving</h1>"
-            f"<h2 style='text-align:center; color:red; animation: blinker 1s infinite;'>#{ticket} - {name}</h2>"
+            f"<h2 style='text-align:center; color:red;'>#{ticket} - {name}</h2>"
             f"<h3 style='text-align:center; color:blue;'>Proceed to {destination}</h3>",
             unsafe_allow_html=True)
         audio_file = announce_patient(ticket, name, destination)
@@ -162,117 +170,63 @@ elif menu == "TV Display":
     tips = ["💧 Drink water", "🍎 Eat fruits", "🏃‍♂️ Exercise daily", "🧘 Meditate", "💉 Get vaccinated"]
     st.markdown(f"<p style='text-align:center; font-size:20px; color:green;'>{random.choice(tips)}</p>", unsafe_allow_html=True)
 
-elif menu == "Triage":
-    st.title("📋 Triage Station (Login Required)")
-    if "triage_logged" not in st.session_state:
-        st.session_state.triage_logged = False
-    if not st.session_state.triage_logged:
-        pw = st.text_input("Triage Password", type="password")
-        if st.button("Login"):
-            if pw == "triage123":
-                st.session_state.triage_logged = True
-                st.success("✅ Triage login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        weight = st.number_input("Weight (kg)")
-        height = st.number_input("Height (cm)")
-        bp = st.text_input("Blood Pressure")
-        if st.button("Save Triage"):
-            update_triage(pid, weight, height, bp)
-            st.success("✅ Patient triaged → Consultation")
-        if st.button("Logout"):
-            st.session_state.triage_logged = False
+elif menu == "Patient Records":
+    st.title("📂 Patient Records")
 
-elif menu == "Doctor Panel":
-    st.title("👨‍⚕️ Doctor Panel (Login Required)")
-    if "doctor_logged" not in st.session_state:
-        st.session_state.doctor_logged = False
-    if not st.session_state.doctor_logged:
-        pw = st.text_input("Doctor Password", type="password")
-        if st.button("Login"):
-            if pw == "doctor123":
-                st.session_state.doctor_logged = True
-                st.success("✅ Doctor login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        condition = st.text_area("Condition / Diagnosis")
-        destination = st.selectbox("Send to", ["Pharmacy", "Lab", "Payment"])
-        if st.button("Complete Consultation"):
-            update_doctor(pid, condition, destination)
-            st.success(f"✅ Patient sent to {destination}")
-        st.dataframe(get_queue())
-        if st.button("Logout"):
-            st.session_state.doctor_logged = False
+    df = pd.read_sql("SELECT * FROM patients", conn)
+    st.dataframe(df)
 
-elif menu == "Pharmacy":
-    st.title("💊 Pharmacy Dashboard (Login Required)")
-    if "pharmacy_logged" not in st.session_state:
-        st.session_state.pharmacy_logged = False
-    if not st.session_state.pharmacy_logged:
-        pw = st.text_input("Pharmacy Password", type="password")
-        if st.button("Login"):
-            if pw == "pharmacy123":
-                st.session_state.pharmacy_logged = True
-                st.success("✅ Pharmacy login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        df = pd.read_sql("SELECT * FROM queue WHERE destination='Pharmacy' AND status!='done'", conn)
-        st.dataframe(df)
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        if st.button("Mark as Done"):
-            mark_done(pid, "Pharmacy")
-            st.success("✅ Patient served at Pharmacy")
-        if st.button("Logout"):
-            st.session_state.pharmacy_logged = False
+    # Upload CSV/Excel
+    st.subheader("📤 Upload Hospital Data")
+    file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
+    if file is not None:
+        if file.name.endswith(".csv"):
+            new_df = pd.read_csv(file)
+        else:
+            new_df = pd.read_excel(file)
+        st.write("Preview of uploaded data:")
+        st.dataframe(new_df.head())
 
-elif menu == "Lab":
-    st.title("🧪 Lab Dashboard (Login Required)")
-    if "lab_logged" not in st.session_state:
-        st.session_state.lab_logged = False
-    if not st.session_state.lab_logged:
-        pw = st.text_input("Lab Password", type="password")
-        if st.button("Login"):
-            if pw == "lab123":
-                st.session_state.lab_logged = True
-                st.success("✅ Lab login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        df = pd.read_sql("SELECT * FROM queue WHERE destination='Lab' AND status!='done'", conn)
-        st.dataframe(df)
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        if st.button("Mark as Done"):
-            mark_done(pid, "Lab")
-            st.success("✅ Patient served at Lab")
-        if st.button("Logout"):
-            st.session_state.lab_logged = False
+        if st.button("Save Uploaded Data"):
+            for _, row in new_df.iterrows():
+                # Check if patient already exists (by first + surname + age)
+                c.execute("SELECT id FROM patients WHERE first_name=? AND surname=? AND age=?", 
+                          (row.get("first_name", ""), row.get("surname", ""), row.get("age", 0)))
+                existing = c.fetchone()
+                if existing:
+                    update_patient(existing[0],
+                        row.get("first_name", ""), row.get("middle_name", ""), row.get("surname", ""),
+                        int(row.get("age", 0)), row.get("gender", ""),
+                        row.get("weight", None), row.get("height", None), row.get("bp", None), row.get("condition", "")
+                    )
+                else:
+                    add_patient(
+                        row.get("first_name", ""), row.get("middle_name", ""), row.get("surname", ""),
+                        int(row.get("age", 0)), row.get("gender", "")
+                    )
+            st.success("✅ Records updated successfully!")
 
-elif menu == "Payment":
-    st.title("💵 Payment Dashboard (Login Required)")
-    if "payment_logged" not in st.session_state:
-        st.session_state.payment_logged = False
-    if not st.session_state.payment_logged:
-        pw = st.text_input("Payment Password", type="password")
-        if st.button("Login"):
-            if pw == "payment123":
-                st.session_state.payment_logged = True
-                st.success("✅ Payment login successful")
-            else:
-                st.error("❌ Wrong password")
-    else:
-        df = pd.read_sql("SELECT * FROM queue WHERE destination='Payment' AND status!='done'", conn)
-        st.dataframe(df)
-        pid = st.number_input("Patient ID", step=1, min_value=1)
-        if st.button("Mark as Done"):
-            mark_done(pid, "Payment")
-            st.success("✅ Patient cleared Payment")
-        if st.button("Logout"):
-            st.session_state.payment_logged = False
+    # Update existing patient manually
+    st.subheader("✏️ Update Patient Info")
+    pid = st.number_input("Enter Patient ID to update", step=1, min_value=1)
+    if st.button("Fetch Patient"):
+        patient = pd.read_sql("SELECT * FROM patients WHERE id=?", conn, params=(pid,))
+        if not patient.empty:
+            st.write(patient)
+            first_name = st.text_input("First Name", patient["first_name"].iloc[0])
+            middle_name = st.text_input("Middle Name", patient["middle_name"].iloc[0])
+            surname = st.text_input("Surname", patient["surname"].iloc[0])
+            age = st.number_input("Age", 0, 120, patient["age"].iloc[0])
+            gender = st.selectbox("Gender", ["Male", "Female", "Other"], 
+                                   index=["Male", "Female", "Other"].index(patient["gender"].iloc[0]))
+            weight = st.number_input("Weight (kg)", value=float(patient["weight"].iloc[0]) if patient["weight"].iloc[0] else 0.0)
+            height = st.number_input("Height (cm)", value=float(patient["height"].iloc[0]) if patient["height"].iloc[0] else 0.0)
+            bp = st.text_input("Blood Pressure", patient["bp"].iloc[0] if patient["bp"].iloc[0] else "")
+            condition = st.text_area("Condition", patient["condition"].iloc[0] if patient["condition"].iloc[0] else "")
+
+            if st.button("Update Patient"):
+                update_patient(pid, first_name, middle_name, surname, age, gender, weight, height, bp, condition)
+                st.success("✅ Patient updated successfully")
 
 elif menu == "Analytics":
     st.title("📊 Analytics Dashboard")
@@ -280,8 +234,7 @@ elif menu == "Analytics":
     if not df.empty:
         df["entry_time"] = pd.to_datetime(df["entry_time"], errors="coerce")
         df["exit_time"] = pd.to_datetime(df["exit_time"], errors="coerce")
-        df = df.dropna(subset=["entry_time", "exit_time"])  
-
+        df = df.dropna(subset=["entry_time", "exit_time"])
         if not df.empty:
             df["wait"] = (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60
             st.metric("Average Wait Time", f"{df['wait'].mean():.1f} min")
@@ -293,45 +246,8 @@ elif menu == "Analytics":
     else:
         st.info("No data yet.")
 
-elif menu == "Chatbot":
-    st.title("🤖 Hospital Chatbot")
-    faq = {
-        "register": "📝 Register at the kiosk and get a ticket.",
-        "triage": "📋 Triage includes weight, height, and blood pressure checks.",
-        "doctor": "👨‍⚕️ Doctor consultation follows triage.",
-        "pharmacy": "💊 Go to pharmacy after consultation.",
-        "lab": "🧪 Go to lab if doctor refers you.",
-        "payment": "💵 Finish at payment counter."
-    }
-    q = st.text_input("Ask me something...")
-    if q:
-        match = get_close_matches(q.lower(), faq.keys(), n=1, cutoff=0.4)
-        if match:
-            st.write(faq[match[0]])
-        else:
-            st.write("I’m still learning 🤖. Please ask reception.")
 
-elif menu == "FAQs":
-    st.title("❓ Frequently Asked Questions")
-    st.write("""
-    **Q: How do I register?**  
-    A: Use the kiosk at the entrance.  
 
-    **Q: What happens at triage?**  
-    A: Vitals are recorded (weight, height, BP).  
-
-    **Q: Where do I go after the doctor?**  
-    A: You’ll be directed to Pharmacy, Lab, or Payment.  
-    """)
-
-elif menu == "Contacts":
-    st.title("📞 Contact Us")
-    st.markdown("""
-    **📧 Email:** [marrionwahome974@gmail.com](mailto:marrionwahome974@gmail.com)  
-    **📱 Phone:** +254111838986  
-    """)
-    st.info("We’re here to support you with any issues or inquiries.")
 
   
 
-# (keep your Triage, Doctor, Pharmacy, Lab, Payment, Chatbot, FAQ, Contacts code unchanged)
